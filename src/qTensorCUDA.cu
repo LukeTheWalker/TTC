@@ -165,6 +165,15 @@ cublasHandle_t handle;
 // python binding code for a single contraction
 extern "C" {
     void single_contraction (cpx* A, cpx* B, cpx* C, size_t rankA, size_t rankB, size_t rankC, unsigned char* spanA, unsigned char* spanB, unsigned char* spanC, size_t spanA_size, size_t spanB_size, size_t spanC_size){
+        // initialize cublas
+        cublasStatus_t status;
+        status = cublasCreate(&handle); 
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "cublasCreate failed: %s\n", _cudaGetErrorEnum(status));
+            exit(EXIT_FAILURE);
+        }
+
+
         std::vector<unsigned char> connections = findCommonValues(std::vector<unsigned char>(spanA, spanA + rankA), std::vector<unsigned char>(spanB, spanB + rankB));
         
         cudaError_t err;
@@ -203,7 +212,7 @@ extern "C" {
             // std::cout << "numBlocks: " << numBlocks << " blocksize: " << blocksize << std::endl;
 
             // if the span are the same use gemm
-            if (std::equal(spanA, spanA + rankA, spanB)) {
+            if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB)) {
                 cublasSetStream(handle, 0);
                 size_t nels = 1 << (spanC_size);
                 cpx alpha = {1.0, 0.0};
