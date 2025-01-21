@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <bitsetCU.hpp>
-// #include <oneapi/mkl.hpp>
+#include <oneapi/mkl.hpp>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -77,17 +77,9 @@ void single_contraction(cpx* A, cpx* B, cpx* C,
                            std::vector<unsigned char>(spanB, spanB + rankB));
 
         const size_t result_size = 1 << (spanC_size * 2);
-        sycl::buffer<cpx> buf_A((1 << (spanA_size * 2)));
-        sycl::buffer<cpx> buf_B((1 << (spanB_size * 2)));
-        sycl::buffer<cpx> buf_result(result_size);
-
-        // Copy input data
-        {
-            auto acc_A = buf_A.get_access<sycl::access::mode::write>();
-            auto acc_B = buf_B.get_access<sycl::access::mode::write>();
-            std::copy(A, A + (1 << (spanA_size * 2)), acc_A.begin());
-            std::copy(B, B + (1 << (spanB_size * 2)), acc_B.begin());
-        }
+        sycl::buffer<cpx> buf_A(A, sycl::range<1>(1 << (spanA_size * 2)));
+        sycl::buffer<cpx> buf_B(B, sycl::range<1>(1 << (spanB_size * 2)));
+        sycl::buffer<cpx> buf_result(C, sycl::range<1>(result_size));
 
         if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB)) {
             mkl_matrix_multiply(buf_A, buf_B, buf_result, spanC_size);
@@ -98,45 +90,47 @@ void single_contraction(cpx* A, cpx* B, cpx* C,
                               spanA_size, spanB_size, spanC_size,
                               connections);
         }
-
-        // Copy result back
-        {
-            auto acc_result = buf_result.get_access<sycl::access::mode::read>();
-            std::copy(acc_result.begin(), acc_result.end(), C);
-        }
     }
 
 private:
     sycl::queue queue_;
 
     void mkl_matrix_multiply(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
-                           sycl::buffer<cpx>& C, size_t size) {
-        const size_t WORK_GROUP_SIZE = 256;
-        const size_t result_size = 1 << (size * 2);
+                            sycl::buffer<cpx>& C, size_t size) {
+        using namespace oneapi::mkl;
 
-        queue_.submit([&](sycl::handler& h) {
-            auto acc_A = A.get_access<sycl::access::mode::read>(h);
-            auto acc_B = B.get_access<sycl::access::mode::read>(h);
-            auto acc_C = C.get_access<sycl::access::mode::write>(h);
+        // Calculate matrix dimension
+        const int n = 1 << size;  // Matrix dimension is 2^size
+        
+        // Define scaling factors
+        std::complex<double> alpha(1.0, 0.0);
+        std::complex<double> beta(0.0, 0.0);
 
-            sycl::range<1> global{((result_size + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE) * WORK_GROUP_SIZE};
-            sycl::range<1> local{WORK_GROUP_SIZE};
-
-            h.parallel_for(sycl::nd_range<1>{global, local}, [=](sycl::nd_item<1> item) {
-                const size_t i = item.get_global_id(0);
-                if (i < result_size) {
-                    size_t row = i >> size;
-                    size_t col = i & ((1 << size) - 1);
-                    cpx sum = 0;
-                    for (size_t k = 0; k < (1 << size); k++) {
-                        sum += acc_A[row * (1 << size) + k] * acc_B[k * (1 << size) + col];
-                    }
-                    acc_C[i] = sum;
-                }
-            });
-        });
+        // Perform matrix multiplication C = alpha*A*B + beta*C using gemm
+        try {
+            // Submit the computation to the default queue
+            blas::column_major::gemm(queue_, transpose::nontrans, transpose::nontrans,
+                n,                    // Number of rows of A and C
+                n,                    // Number of columns of B and C
+                n,                    // Number of columns of A / rows of B
+                alpha,                // Scaling factor for AB
+                A,                    // Buffer A
+                n,                    // Leading dimension of A
+                B,                    // Buffer B
+                n,                    // Leading dimension of B
+                beta,                 // Scaling factor for C
+                C,                    // Buffer C
+                n);                   // Leading dimension of C
+        }
+        catch (sycl::exception const& e) {
+            std::cerr << "SYCL exception caught: " << e.what() << std::endl;
+            throw;
+        }
+        catch (std::exception const& e) {
+            std::cerr << "Standard exception caught: " << e.what() << std::endl;
+            throw;
+        }
     }
-
     // Previous general_contraction implementation remains the same
     void general_contraction(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
                            sycl::buffer<cpx>& result,

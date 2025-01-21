@@ -59,6 +59,7 @@ def single_contraction_test(num_qubits):
 
     circuit.unitary(create_random_unitary(num_qubits, seed), range(num_qubits))
     circuit.unitary(create_random_unitary(num_qubits - 1, seed), range(num_qubits - 1))
+    # circuit.unitary(create_random_unitary(num_qubits, seed), range(num_qubits))
     # circuit.unitary(create_random_unitary(num_qubits // 2, seed), range(0, num_qubits, 2))
     
     return circuit
