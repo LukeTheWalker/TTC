@@ -249,9 +249,13 @@ def oe_einsum(qc, einsum_str):
     return result_matrix, (end_time - start_time) * 1000
 
 def main():
-    if len(sys.argv) != 2:
+    sanity_check = False
+    if len(sys.argv) < 2:
         print('Usage: python main.py <num_qubits>')
         sys.exit(1)
+    if len(sys.argv) == 3 and sys.argv[2] == '--sanity':
+        sanity_check = True
+
     num_qubits = int(sys.argv[1])
     qc = single_contraction_test(num_qubits)
 
@@ -263,27 +267,28 @@ def main():
     numpy_times = []
 
     einsum_str = get_einsum_str(qc)
-    n_samples = 10
+    n_samples = 1 if sanity_check else 10
     
     for _ in tqdm(range(n_samples)):
-        if num_qubits <= 10:
-            unitary_matrix, time_ms = get_unitary_with_qiskit(qc)
-            qiskit_times.append(time_ms)
-                    
-        unitary_matrix_oe, time_ms = oe_einsum(qc, einsum_str)
-        oe_times.append(time_ms)
+        if not sanity_check:
+            if num_qubits <= 10:
+                unitary_matrix, time_ms = get_unitary_with_qiskit(qc)
+                qiskit_times.append(time_ms)
+                        
+            unitary_matrix_oe, time_ms = oe_einsum(qc, einsum_str)
+            oe_times.append(time_ms)
 
-        unitary_matrix_cuq, time_ms = cuquantum_einsum(qc, einsum_str)
-        cuquantum_times.append(time_ms)
+            unitary_matrix_cuq, time_ms = cuquantum_einsum(qc, einsum_str)
+            cuquantum_times.append(time_ms)
 
-        unitary_matrix_np, time_ms = numpy_einsum(qc, einsum_str)
-        numpy_times.append(time_ms)
+            unitary_matrix_np, time_ms = numpy_einsum(qc, einsum_str)
+            numpy_times.append(time_ms)
 
         unitary_matrix_cpp, time_ms = contract_cppsim(qc)
         cpp_times.append(time_ms)
 
 
-    if n_samples > 2:
+    if n_samples > 2 and not sanity_check:
         # remove best and worst times
         if num_qubits <= 10:
             qiskit_times.remove(max(qiskit_times))
@@ -308,7 +313,7 @@ def main():
     print(f'Opteinsum execution time: {execution_time_ms_oe} ms')
     print(f'cuQuantum execution time: {execution_time_ms_cuq} ms')
     print(f'NumPy execution time: {execution_time_ms_np} ms')
-    if num_qubits <= 10:
+    if num_qubits <= 10 and not sanity_check:
         print(f'Error between Qiskit and C++: {get_error(unitary_matrix, unitary_matrix_cpp)}')
         print(f'Error between Qiskit and Opteinsum: {get_error(unitary_matrix, unitary_matrix_oe)}')
         print(f'Error between Qiskit and cuQuantum: {get_error(unitary_matrix, unitary_matrix_cuq)}')
