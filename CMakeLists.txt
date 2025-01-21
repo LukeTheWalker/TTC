@@ -35,11 +35,15 @@ if (ENABLE_SYCL)
     # Find Intel oneAPI MKL
     find_package(MKL CONFIG REQUIRED)
     
+    # Add MKL flags for SYCL
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DMKL_ILP64 -DMKL_SYCL")
+    
     # Add MKL include directories
     include_directories(${MKL_INCLUDE})
+    
+    # Ensure linking against MKL SYCL libraries
+    list(APPEND CMAKE_PREFIX_PATH $ENV{MKLROOT})
 endif()
-
-
 # Add the include directory
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
@@ -61,7 +65,7 @@ add_library(TTC SHARED ${CPP_SOURCES})
 
 # Link against required libraries
 if (ENABLE_SYCL)
-    target_link_libraries(TTC PRIVATE MKL::MKL)
+    target_link_libraries(TTC PRIVATE MKL::MKL_SYCL MKL::MKL_DPCPP)
 endif()
 
 if (OpenMP_CXX_FOUND)

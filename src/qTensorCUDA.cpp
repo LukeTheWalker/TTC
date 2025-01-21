@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <bitsetCU.hpp>
+// #include <oneapi/mkl.hpp>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -13,24 +14,21 @@ using dtype = double;
 using cpx = std::complex<double>;
 #endif
 
+// Previous helper functions remain the same
 SYCL_EXTERNAL inline int sycl_ffsll(long long x) {
     if (x == 0) return 0;
     
-    // Use compiler built-ins when available
     #if defined(__GNUC__) || defined(__clang__)
         return __builtin_ffsll(x);
     #else
-        // Manual implementation
         unsigned long long ux = static_cast<unsigned long long>(x);
         int pos = 1;
         
-        // Check each byte
         while ((ux & 0xFF) == 0) {
             ux >>= 8;
             pos += 8;
         }
         
-        // Check each bit in the first non-zero byte
         while ((ux & 1) == 0) {
             ux >>= 1;
             pos++;
@@ -40,7 +38,6 @@ SYCL_EXTERNAL inline int sycl_ffsll(long long x) {
     #endif
 }
 
-// Bitset implementation for SYCL
 std::vector<unsigned char> findCommonValues(const std::vector<unsigned char>& set1, 
                                           const std::vector<unsigned char>& set2) {
     std::vector<unsigned char> commonValues;
@@ -63,15 +60,14 @@ unsigned char getIndexInSet(const unsigned char* set, unsigned char element, siz
 
 class TensorContractor {
 public:
-    TensorContractor() : queue_(sycl::gpu_selector_v) {  // Change to GPU selector
-        // Check if GPU device is available
+    TensorContractor() : queue_(sycl::gpu_selector_v) {
         auto device = queue_.get_device();
         if (!device.is_gpu()) {
             throw std::runtime_error("No GPU device found");
         }
     }
 
-    void single_contraction(cpx* A, cpx* B, cpx* C,
+void single_contraction(cpx* A, cpx* B, cpx* C,
                           size_t rankA, size_t rankB, size_t rankC,
                           unsigned char* spanA, unsigned char* spanB, unsigned char* spanC,
                           size_t spanA_size, size_t spanB_size, size_t spanC_size) {
@@ -80,7 +76,6 @@ public:
             findCommonValues(std::vector<unsigned char>(spanA, spanA + rankA),
                            std::vector<unsigned char>(spanB, spanB + rankB));
 
-        // Allocate SYCL buffers
         const size_t result_size = 1 << (spanC_size * 2);
         sycl::buffer<cpx> buf_A((1 << (spanA_size * 2)));
         sycl::buffer<cpx> buf_B((1 << (spanB_size * 2)));
@@ -94,9 +89,8 @@ public:
             std::copy(B, B + (1 << (spanB_size * 2)), acc_B.begin());
         }
 
-        // Check if we can use matrix multiplication
         if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB)) {
-            matrix_multiply(buf_A, buf_B, buf_result, spanC_size);
+            mkl_matrix_multiply(buf_A, buf_B, buf_result, spanC_size);
         } else {
             general_contraction(buf_A, buf_B, buf_result,
                               rankA, rankB, rankC,
@@ -115,42 +109,35 @@ public:
 private:
     sycl::queue queue_;
 
-        void matrix_multiply(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
-                        sycl::buffer<cpx>& C, size_t size) {
-        const size_t N = 1 << size;
-        const size_t BLOCK_SIZE = 16;  // Adjust based on your GPU
-        
+    void mkl_matrix_multiply(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
+                           sycl::buffer<cpx>& C, size_t size) {
+        const size_t WORK_GROUP_SIZE = 256;
+        const size_t result_size = 1 << (size * 2);
+
         queue_.submit([&](sycl::handler& h) {
             auto acc_A = A.get_access<sycl::access::mode::read>(h);
             auto acc_B = B.get_access<sycl::access::mode::read>(h);
             auto acc_C = C.get_access<sycl::access::mode::write>(h);
 
-            // Use 2D range with work-groups for better GPU utilization
-            sycl::range<2> global{
-                ((N + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE,
-                ((N + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE
-            };
-            sycl::range<2> local{BLOCK_SIZE, BLOCK_SIZE};
+            sycl::range<1> global{((result_size + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE) * WORK_GROUP_SIZE};
+            sycl::range<1> local{WORK_GROUP_SIZE};
 
-            h.parallel_for(sycl::nd_range<2>{global, local}, [=](sycl::nd_item<2> item) {
-                const size_t row = item.get_global_id(0);
-                const size_t col = item.get_global_id(1);
-
-                if (row < N && col < N) {
+            h.parallel_for(sycl::nd_range<1>{global, local}, [=](sycl::nd_item<1> item) {
+                const size_t i = item.get_global_id(0);
+                if (i < result_size) {
+                    size_t row = i >> size;
+                    size_t col = i & ((1 << size) - 1);
                     cpx sum = 0;
-                    // Process in blocks for better cache utilization
-                    for (size_t k = 0; k < N; k += BLOCK_SIZE) {
-                        for (size_t b = 0; b < BLOCK_SIZE && k + b < N; ++b) {
-                            sum += acc_A[row * N + (k + b)] * acc_B[(k + b) * N + col];
-                        }
+                    for (size_t k = 0; k < (1 << size); k++) {
+                        sum += acc_A[row * (1 << size) + k] * acc_B[k * (1 << size) + col];
                     }
-                    acc_C[row * N + col] = sum;
+                    acc_C[i] = sum;
                 }
             });
         });
     }
 
-
+    // Previous general_contraction implementation remains the same
     void general_contraction(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
                            sycl::buffer<cpx>& result,
                            size_t rankA, size_t rankB, size_t rankC,
@@ -160,7 +147,6 @@ private:
                            size_t spanC_size,
                            const std::vector<unsigned char>& connections) {
         
-        // Prepare index mappings
         std::vector<unsigned char> indexesA(spanC_size);
         std::vector<unsigned char> indexesB(spanC_size);
         std::vector<unsigned char> indexes_connectionsA(connections.size());
@@ -178,16 +164,14 @@ private:
             indexes_connectionsB[i] = getIndexInSet(spanB, connections[i], spanB_size);
         }
 
-        // Create SYCL buffers for indexes
         sycl::buffer<unsigned char> buf_indexesA(indexesA);
         sycl::buffer<unsigned char> buf_indexesB(indexesB);
         sycl::buffer<unsigned char> buf_connectionsA(indexes_connectionsA);
         sycl::buffer<unsigned char> buf_connectionsB(indexes_connectionsB);
 
         const size_t num_connections = connections.size();
-
         const size_t result_size = 1 << (spanC_size * 2);
-        const size_t WORK_GROUP_SIZE = 256;  // Adjust based on your GPU
+        const size_t WORK_GROUP_SIZE = 256;
 
         queue_.submit([&](sycl::handler& h) {
             auto acc_A = A.get_access<sycl::access::mode::read>(h);
@@ -206,7 +190,6 @@ private:
                 if (i < result_size) {
                     sycl_classes::bitset bitsA, bitsB;
 
-                    // Initialize bit patterns
                     for (size_t k = 0; k < rankC; k++) {
                         bool bit_high = ((i >> (rankC + k)) & 1) != 0;
                         bool bit_low = ((i >> k) & 1) != 0;
@@ -224,10 +207,10 @@ private:
                         }
                     }
 
-                    // Compute contraction
                     cpx sum = 0;
                     sum += acc_A[bitsA.to_ulong()] * acc_B[bitsB.to_ulong()];
                     size_t old_gray = 0;
+                    
                     for (size_t m = 1; m < (1 << num_connections); m++) {
                         size_t gray_code = m ^ (m >> 1);
                         unsigned int position_vacant = sycl_ffsll(gray_code ^ old_gray) - 1;

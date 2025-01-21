@@ -263,8 +263,9 @@ def main():
     numpy_times = []
 
     einsum_str = get_einsum_str(qc)
+    n_samples = 10
     
-    for _ in tqdm(range(10)):
+    for _ in tqdm(range(n_samples)):
         if num_qubits <= 10:
             unitary_matrix, time_ms = get_unitary_with_qiskit(qc)
             qiskit_times.append(time_ms)
@@ -282,18 +283,19 @@ def main():
         cpp_times.append(time_ms)
 
 
-    # remove best and worst times
-    if num_qubits <= 10:
-        qiskit_times.remove(max(qiskit_times))
-        qiskit_times.remove(min(qiskit_times))
-    cpp_times.remove(max(cpp_times))
-    cpp_times.remove(min(cpp_times))
-    oe_times.remove(max(oe_times))
-    oe_times.remove(min(oe_times))
-    cuquantum_times.remove(max(cuquantum_times))
-    cuquantum_times.remove(min(cuquantum_times))
-    numpy_times.remove(max(numpy_times))
-    numpy_times.remove(min(numpy_times))
+    if n_samples > 2:
+        # remove best and worst times
+        if num_qubits <= 10:
+            qiskit_times.remove(max(qiskit_times))
+            qiskit_times.remove(min(qiskit_times))
+        cpp_times.remove(max(cpp_times))
+        cpp_times.remove(min(cpp_times))
+        oe_times.remove(max(oe_times))
+        oe_times.remove(min(oe_times))
+        cuquantum_times.remove(max(cuquantum_times))
+        cuquantum_times.remove(min(cuquantum_times))
+        numpy_times.remove(max(numpy_times))
+        numpy_times.remove(min(numpy_times))
 
     execution_time_ms = np.mean(qiskit_times)
     execution_time_ms_cpp = np.mean(cpp_times) 
