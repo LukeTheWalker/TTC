@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sycl/sycl.hpp>
+
 namespace sycl_classes {
     class bitset {
     public:

@@ -1,9 +1,9 @@
-#include <sycl/sycl.hpp>
-#include <complex>
-#include <vector>
 #include <algorithm>
-#include <iostream>
 #include <bitsetCU.hpp>
+#include <complex>
+#include <iostream>
+#include <sycl/sycl.hpp>
+#include <vector>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -13,95 +13,137 @@ using dtype = double;
 using cpx = std::complex<double>;
 #endif
 
+struct gate
+{
+    unsigned char *qubits;
+    cpx *unitary;
+    size_t rank;
+};
+
 // Previous helper functions remain the same
-SYCL_EXTERNAL inline int sycl_ffsll(long long x) {
-    if (x == 0) return 0;
-    
-    #if defined(__GNUC__) || defined(__clang__)
-        return __builtin_ffsll(x);
-    #else
-        unsigned long long ux = static_cast<unsigned long long>(x);
-        int pos = 1;
-        
-        while ((ux & 0xFF) == 0) {
-            ux >>= 8;
-            pos += 8;
-        }
-        
-        while ((ux & 1) == 0) {
-            ux >>= 1;
-            pos++;
-        }
-        
-        return pos;
-    #endif
+SYCL_EXTERNAL inline int sycl_ffsll(long long x)
+{
+    if (x == 0)
+        return 0;
+
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_ffsll(x);
+#else
+    unsigned long long ux = static_cast<unsigned long long>(x);
+    int pos = 1;
+
+    while ((ux & 0xFF) == 0)
+    {
+        ux >>= 8;
+        pos += 8;
+    }
+
+    while ((ux & 1) == 0)
+    {
+        ux >>= 1;
+        pos++;
+    }
+
+    return pos;
+#endif
 }
 
-std::vector<unsigned char> findCommonValues(const std::vector<unsigned char>& set1, 
-                                          const std::vector<unsigned char>& set2) {
+std::vector<unsigned char> findCommonValues(const std::vector<unsigned char> &set1,
+                                            const std::vector<unsigned char> &set2)
+{
     std::vector<unsigned char> commonValues;
-    for (auto value : set1) {
-        if (std::find(set2.begin(), set2.end(), value) != set2.end()) {
+    for (auto value : set1)
+    {
+        if (std::find(set2.begin(), set2.end(), value) != set2.end())
+        {
             commonValues.push_back(value);
         }
     }
     return commonValues;
 }
 
-unsigned char getIndexInSet(const unsigned char* set, unsigned char element, size_t size) {
-    for (size_t i = 0; i < size; i++) {
-        if (set[i] == element) {
+unsigned char getIndexInSet(const unsigned char *set, unsigned char element, size_t size)
+{
+    for (size_t i = 0; i < size; i++)
+    {
+        if (set[i] == element)
+        {
             return i;
         }
     }
     return 255;
 }
 
-class TensorContractor {
+class TensorContractor
+{
 public:
-    TensorContractor() : queue_(sycl::gpu_selector_v) {
+    TensorContractor() : queue_(sycl::gpu_selector_v)
+    {
         auto device = queue_.get_device();
-        if (!device.is_gpu()) {
+        if (!device.is_gpu())
+        {
             throw std::runtime_error("No GPU device found");
         }
     }
 
-void single_contraction(cpx* A, cpx* B, cpx* C,
-                          size_t rankA, size_t rankB, size_t rankC,
-                          unsigned char* spanA, unsigned char* spanB, unsigned char* spanC,
-                          size_t spanA_size, size_t spanB_size, size_t spanC_size) {
-        
-        std::vector<unsigned char> connections = 
-            findCommonValues(std::vector<unsigned char>(spanA, spanA + rankA),
-                           std::vector<unsigned char>(spanB, spanB + rankB));
+    void optimal_contraction(sycl::buffer<cpx> &buf_A,
+                             sycl::buffer<cpx> &buf_B,
+                             sycl::buffer<cpx> &buf_result,
+                             const size_t rankA,
+                             const size_t rankB,
+                             const size_t rankC,
+                             const unsigned char *spanA,
+                             const unsigned char *spanB,
+                             const unsigned char *spanC,
+                             const std::vector<unsigned char> &connections)
+    {
+        if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB))
+        {
+            mkl_matrix_multiply(buf_A, buf_B, buf_result, rankC);
+        }
+        else
+        {
+            general_contraction(buf_A, buf_B, buf_result,
+                                rankA, rankB, rankC,
+                                spanA, spanB, spanC,
+                                connections);
+        }
+    }
 
-        const size_t result_size = 1 << (spanC_size * 2);
-        sycl::buffer<cpx> buf_A(A, sycl::range<1>(1 << (spanA_size * 2)));
-        sycl::buffer<cpx> buf_B(B, sycl::range<1>(1 << (spanB_size * 2)));
+    void single_contraction(const cpx *A, const cpx *B, cpx *C,
+                            const size_t rankA, const size_t rankB, size_t rankC,
+                            const unsigned char *spanA, const unsigned char *spanB, const unsigned char *spanC)
+    {
+
+        std::vector<unsigned char> connections =
+            findCommonValues(std::vector<unsigned char>(spanA, spanA + rankA),
+                             std::vector<unsigned char>(spanB, spanB + rankB));
+
+        const size_t result_size = 1 << (rankC * 2);
+        sycl::buffer<cpx> buf_A(A, sycl::range<1>(1 << (rankA * 2)));
+        sycl::buffer<cpx> buf_B(B, sycl::range<1>(1 << (rankB * 2)));
         sycl::buffer<cpx> buf_result(C, sycl::range<1>(result_size));
 
-        if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB)) {
-            mkl_matrix_multiply(buf_A, buf_B, buf_result, spanC_size);
-        } else {
-            general_contraction(buf_A, buf_B, buf_result,
-                              rankA, rankB, rankC,
-                              spanA, spanB, spanC,
-                              spanA_size, spanB_size, spanC_size,
-                              connections);
-        }
+        optimal_contraction(buf_A, buf_B, buf_result,
+                            rankA, rankB, rankC,
+                            spanA, spanB, spanC,
+                            connections);
     }
 
 private:
     sycl::queue queue_;
 
-    void mkl_matrix_multiply(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
-                            sycl::buffer<cpx>& C, size_t size) {
+    void mkl_matrix_multiply(sycl::buffer<cpx> &A, sycl::buffer<cpx> &B,
+                             sycl::buffer<cpx> &C, size_t size)
+    {
 
         // Calculate matrix dimension
-        const int n = 1 << size;  // Matrix dimension is 2^size
+        const int n = 1 << size; // Matrix dimension is 2^size
 
-        try {
-            queue_.submit([&](sycl::handler& h) {
+        try
+        {
+            queue_.submit([&](sycl::handler &h)
+                          {
                 auto a = A.get_access<sycl::access::mode::read>(h);
                 auto b = B.get_access<sycl::access::mode::read>(h);
                 auto c = C.get_access<sycl::access::mode::write>(h);
@@ -122,43 +164,46 @@ private:
                         }
                         c[row * n + col] = sum;
                     }
-                );
-            }).wait();
+                ); })
+                .wait_and_throw();
         }
-        catch (sycl::exception const& e) {
+        catch (sycl::exception const &e)
+        {
             std::cerr << "SYCL exception caught: " << e.what() << std::endl;
             throw;
         }
-        catch (std::exception const& e) {
+        catch (std::exception const &e)
+        {
             std::cerr << "Standard exception caught: " << e.what() << std::endl;
             throw;
         }
     }
     // Previous general_contraction implementation remains the same
-    void general_contraction(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
-                           sycl::buffer<cpx>& result,
-                           size_t rankA, size_t rankB, size_t rankC,
-                           unsigned char* spanA, unsigned char* spanB,
-                           unsigned char* spanC,
-                           size_t spanA_size, size_t spanB_size,
-                           size_t spanC_size,
-                           const std::vector<unsigned char>& connections) {
-        
-        std::vector<unsigned char> indexesA(spanC_size);
-        std::vector<unsigned char> indexesB(spanC_size);
+    void general_contraction(sycl::buffer<cpx> &A, sycl::buffer<cpx> &B,
+                             sycl::buffer<cpx> &result,
+                             size_t rankA, size_t rankB, size_t rankC,
+                             const unsigned char *spanA, const unsigned char *spanB,
+                             const unsigned char *spanC,
+                             const std::vector<unsigned char> &connections)
+    {
+
+        std::vector<unsigned char> indexesA(rankC);
+        std::vector<unsigned char> indexesB(rankC);
         std::vector<unsigned char> indexes_connectionsA(connections.size());
         std::vector<unsigned char> indexes_connectionsB(connections.size());
 
-        #pragma omp parallel for
-        for (size_t i = 0; i < spanC_size; i++) {
-            indexesA[i] = getIndexInSet(spanA, spanC[i], spanA_size);
-            indexesB[i] = getIndexInSet(spanB, spanC[i], spanB_size);
+#pragma omp parallel for
+        for (size_t i = 0; i < rankC; i++)
+        {
+            indexesA[i] = getIndexInSet(spanA, spanC[i], rankA);
+            indexesB[i] = getIndexInSet(spanB, spanC[i], rankB);
         }
 
-        #pragma omp parallel for
-        for (size_t i = 0; i < connections.size(); i++) {
-            indexes_connectionsA[i] = getIndexInSet(spanA, connections[i], spanA_size);
-            indexes_connectionsB[i] = getIndexInSet(spanB, connections[i], spanB_size);
+#pragma omp parallel for
+        for (size_t i = 0; i < connections.size(); i++)
+        {
+            indexes_connectionsA[i] = getIndexInSet(spanA, connections[i], rankA);
+            indexes_connectionsB[i] = getIndexInSet(spanB, connections[i], rankB);
         }
 
         sycl::buffer<unsigned char> buf_indexesA(indexesA);
@@ -167,10 +212,11 @@ private:
         sycl::buffer<unsigned char> buf_connectionsB(indexes_connectionsB);
 
         const size_t num_connections = connections.size();
-        const size_t result_size = 1 << (spanC_size * 2);
+        const size_t result_size = 1 << (rankC * 2);
         const size_t WORK_GROUP_SIZE = 256;
 
-        queue_.submit([&](sycl::handler& h) {
+        queue_.submit([&](sycl::handler &h)
+                      {
             auto acc_A = A.get_access<sycl::access::mode::read>(h);
             auto acc_B = B.get_access<sycl::access::mode::read>(h);
             auto acc_result = result.get_access<sycl::access::mode::read_write>(h);
@@ -225,19 +271,89 @@ private:
                     
                     acc_result[i] = sum;
                 }
-            });
-        });
+            }); });
     }
 };
 
-extern "C" {
-    void single_contraction(cpx* A, cpx* B, cpx* C,
-                          size_t rankA, size_t rankB, size_t rankC,
-                          unsigned char* spanA, unsigned char* spanB, unsigned char* spanC,
-                          size_t spanA_size, size_t spanB_size, size_t spanC_size) {
+struct sycl_gate_wrapper
+{
+    sycl::buffer<cpx> unitary;
+    std::vector<unsigned char> span;
+};
+
+extern "C"
+{
+    void single_contraction(const cpx *A, const cpx *B, cpx *C,
+                            const size_t rankA, const size_t rankB, const size_t rankC,
+                            const unsigned char *spanA, const unsigned char *spanB, const unsigned char *spanC)
+    {
         static TensorContractor contractor;
         contractor.single_contraction(A, B, C, rankA, rankB, rankC,
-                                    spanA, spanB, spanC,
-                                    spanA_size, spanB_size, spanC_size);
+                                      spanA, spanB, spanC);
+    }
+
+    void contract_circuit(gate *gates, size_t num_gates, cpx *result_gate, size_t num_qubits)
+    {
+        static TensorContractor contractor;
+
+        // make a vector holding the pointer to the gates
+        std::vector<std::unique_ptr<sycl_gate_wrapper>> gate_vector;
+        for (size_t i = 0; i < num_gates; i++)
+        {
+            auto wrapper = std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
+                sycl::buffer<cpx>(gates[i].unitary, sycl::range<1>(1 << (2 * gates[i].rank))),
+                std::vector<unsigned char>(gates[i].qubits, gates[i].qubits + gates[i].rank)
+            });
+            gate_vector.push_back(std::move(wrapper));
+        }
+
+        // go through the list of gate, when two consecutive gates perfectly match, contract them, put the result in place of the first gate and remove the second gate
+        while (gate_vector.size() > 1)
+        {
+            for (size_t i = 0; i < gate_vector.size() - 1; i++)
+            {
+                // get the connections between the two gates 
+                std::vector<unsigned char> connections = findCommonValues(
+                    gate_vector[i]->span,
+                    gate_vector[i + 1]->span
+                );
+
+                // the qubits of the result are the union of the qubits of the two gates
+                std::vector<unsigned char> result_qubits;
+                for (size_t j = 0; j < gate_vector[i]->span.size(); j++) result_qubits.push_back(gate_vector[i]->span[j]);
+                for (size_t j = 0; j < gate_vector[i + 1]->span.size(); j++)
+                {
+                    if (std::find(result_qubits.begin(), result_qubits.end(), gate_vector[i + 1]->span[j]) == result_qubits.end())
+                    {
+                    result_qubits.push_back(gate_vector[i + 1]->span[j]);
+                    }
+                }
+
+                // create a new gate with the result qubits
+                auto result_gate = std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
+                    sycl::buffer<cpx>(sycl::range<1>(1 << (2 * result_qubits.size()))),
+                    result_qubits
+                });
+
+                // contract the two gates
+                contractor.optimal_contraction(gate_vector[i]->unitary, gate_vector[i + 1]->unitary, result_gate->unitary,
+                                gate_vector[i]->span.size(), gate_vector[i + 1]->span.size(), result_qubits.size(),
+                                gate_vector[i]->span.data(), gate_vector[i + 1]->span.data(), result_qubits.data(),
+                                connections);
+
+                // put the result in place of the first gate
+                gate_vector[i] = std::move(result_gate);
+
+                // remove the second gate
+                gate_vector.erase(gate_vector.begin() + i + 1);
+
+                break;
+            }
+        }
+
+        // copy the result to the output gate
+        auto acc = gate_vector[0]->unitary.get_host_access(sycl::read_only);
+        std::copy(acc.get_pointer(), acc.get_pointer() + (1 << (2 * num_qubits)), result_gate);
+
     }
 }
