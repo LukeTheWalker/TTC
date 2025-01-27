@@ -6,8 +6,6 @@
 #include <complex>
 #include <set>
 #include <array>
-#include <cuda_runtime.h>
-#include <cuda.h>
 #include "bitset.hpp"
 
 #ifdef USE_FLOAT
@@ -18,34 +16,12 @@ using dtype = double;
 
 class QTensor
 {
-    void cuda_err_check_cpu (cudaError_t err, const char *file, int line)
-    {
-        if (err != cudaSuccess)
-        {
-            fprintf (stderr, "CUDA error: %s (%s:%d)\n", cudaGetErrorString (err), file, line);
-            exit (EXIT_FAILURE);
-        }
-    }
     public:
         // std::set<unsigned char> span;
         // std::vector<std::complex<dtype> > values;
         unsigned char * span = nullptr;
         std::complex<dtype> * values = nullptr;
         QTensor() {}
-        // QTensor(std::set<unsigned char> span): span(span){this->rank = span.size();}
-        QTensor(std::set<unsigned char> span){ 
-            this->rank = span.size();
-            cudaMallocHost(&this->span, span.size(), cudaHostAllocWriteCombined);
-            // this->span = (unsigned char *)malloc(span.size());
-            std::copy(span.begin(), span.end(), this->span);
-        }
-        template <typename T>
-        QTensor(std::vector<T> values, std::vector<unsigned char> span_) : QTensor(std::set<unsigned char>(span_.begin(), span_.end()))
-        {   
-            cudaMallocHost(&this->values, std::pow(2, rank * 2) * sizeof(std::complex<dtype>));
-            for (size_t i = 0 ; i < values.size(); i+=2)
-                this->values[i/2] = {(dtype)values[i], (dtype)values[i+1]};
-        }
 
         void setValues(std::vector<std::complex<dtype>> values) 
         {

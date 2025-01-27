@@ -4,6 +4,7 @@
 #include <string>
 
 #include "qTensor.hpp"
+#include <cstdint>
 
 struct Contraction {
     uint32_t id;
@@ -15,5 +16,4 @@ struct Contraction {
     Contraction* right;
     std::string kind;
     QTensor data;
-    cudaStream_t stream;
 };

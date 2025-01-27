@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <iostream>
 #include <bitsetCU.hpp>
-#include <oneapi/mkl.hpp>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -97,30 +96,34 @@ private:
 
     void mkl_matrix_multiply(sycl::buffer<cpx>& A, sycl::buffer<cpx>& B,
                             sycl::buffer<cpx>& C, size_t size) {
-        using namespace oneapi::mkl;
 
         // Calculate matrix dimension
         const int n = 1 << size;  // Matrix dimension is 2^size
-        
-        // Define scaling factors
-        std::complex<double> alpha(1.0, 0.0);
-        std::complex<double> beta(0.0, 0.0);
 
-        // Perform matrix multiplication C = alpha*A*B + beta*C using gemm
         try {
-            // Submit the computation to the default queue
-            blas::column_major::gemm(queue_, transpose::nontrans, transpose::nontrans,
-                n,                    // Number of rows of A and C
-                n,                    // Number of columns of B and C
-                n,                    // Number of columns of A / rows of B
-                alpha,                // Scaling factor for AB
-                A,                    // Buffer A
-                n,                    // Leading dimension of A
-                B,                    // Buffer B
-                n,                    // Leading dimension of B
-                beta,                 // Scaling factor for C
-                C,                    // Buffer C
-                n);                   // Leading dimension of C
+            queue_.submit([&](sycl::handler& h) {
+                auto a = A.get_access<sycl::access::mode::read>(h);
+                auto b = B.get_access<sycl::access::mode::read>(h);
+                auto c = C.get_access<sycl::access::mode::write>(h);
+
+                const int TILE_SIZE = 32;  // Optimal for V100's architecture
+                
+                h.parallel_for(
+                    sycl::range<2>(n, n),
+                    [=](sycl::id<2> idx) {
+                        const int row = idx[0];
+                        const int col = idx[1];
+                        
+                        cpx sum(0.0, 0.0);
+                        for (int k = 0; k < n; k += TILE_SIZE) {
+                            for (int t = 0; t < TILE_SIZE && k + t < n; t++) {
+                                sum += a[row * n + (k + t)] * b[(k + t) * n + col];
+                            }
+                        }
+                        c[row * n + col] = sum;
+                    }
+                );
+            }).wait();
         }
         catch (sycl::exception const& e) {
             std::cerr << "SYCL exception caught: " << e.what() << std::endl;
