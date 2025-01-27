@@ -249,7 +249,7 @@ def oe_einsum(qc, einsum_str):
     result_matrix = result_matrix.reshape(2 ** (len(C_index) // 2), 2 ** (len(C_index) // 2))
     return result_matrix, (end_time - start_time) * 1000
 
-def main():
+def single_contraction():
     sanity_check = False
     if len(sys.argv) < 2:
         print('Usage: python main.py <num_qubits>')
@@ -321,4 +321,4 @@ def main():
         print(f'Error between Qiskit and NumPy: {get_error(unitary_matrix, unitary_matrix_np)}')
 
 if __name__ == '__main__':
-    main()
+    single_contraction()
