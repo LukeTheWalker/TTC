@@ -96,18 +96,23 @@ public:
                              const unsigned char *spanB,
                              const unsigned char *spanC,
                              const std::vector<unsigned char> &connections)
+
     {
-        if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB))
-        {
-            mkl_matrix_multiply(buf_A, buf_B, buf_result, rankC);
-        }
-        else
-        {
-            general_contraction(buf_A, buf_B, buf_result,
-                                rankA, rankB, rankC,
-                                spanA, spanB, spanC,
-                                connections);
-        }
+        general_contraction(buf_A, buf_B, buf_result,
+                            rankA, rankB, rankC,
+                            spanA, spanB, spanC,
+                            connections);
+        // if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB))
+        // {
+        //     mkl_matrix_multiply(buf_A, buf_B, buf_result, rankC);
+        // }
+        // else
+        // {
+        //     general_contraction(buf_A, buf_B, buf_result,
+        //                         rankA, rankB, rankC,
+        //                         spanA, spanB, spanC,
+        //                         connections);
+        // }
     }
 
     void single_contraction(const cpx *A, const cpx *B, cpx *C,
@@ -215,20 +220,21 @@ private:
         const size_t result_size = 1 << (rankC * 2);
         const size_t WORK_GROUP_SIZE = 256;
 
-        queue_.submit([&](sycl::handler &h)
-                      {
-            auto acc_A = A.get_access<sycl::access::mode::read>(h);
-            auto acc_B = B.get_access<sycl::access::mode::read>(h);
-            auto acc_result = result.get_access<sycl::access::mode::read_write>(h);
-            auto acc_indexesA = buf_indexesA.get_access<sycl::access::mode::read>(h);
-            auto acc_indexesB = buf_indexesB.get_access<sycl::access::mode::read>(h);
-            auto acc_connectionsA = buf_connectionsA.get_access<sycl::access::mode::read>(h);
-            auto acc_connectionsB = buf_connectionsB.get_access<sycl::access::mode::read>(h);
+        try {
+            queue_.submit([&](sycl::handler &h)
+            {
+                auto acc_A = A.get_access<sycl::access::mode::read>(h);
+                auto acc_B = B.get_access<sycl::access::mode::read>(h);
+                auto acc_result = result.get_access<sycl::access::mode::read_write>(h);
+                auto acc_indexesA = buf_indexesA.get_access<sycl::access::mode::read>(h);
+                auto acc_indexesB = buf_indexesB.get_access<sycl::access::mode::read>(h);
+                auto acc_connectionsA = buf_connectionsA.get_access<sycl::access::mode::read>(h);
+                auto acc_connectionsB = buf_connectionsB.get_access<sycl::access::mode::read>(h);
 
-            sycl::range<1> global{((result_size + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE) * WORK_GROUP_SIZE};
-            sycl::range<1> local{WORK_GROUP_SIZE};
+                sycl::range<1> global{((result_size + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE) * WORK_GROUP_SIZE};
+                sycl::range<1> local{WORK_GROUP_SIZE};
 
-            h.parallel_for(sycl::nd_range<1>{global, local}, [=](sycl::nd_item<1> item) {
+                h.parallel_for(sycl::nd_range<1>{global, local}, [=](sycl::nd_item<1> item) {
                 const size_t i = item.get_global_id(0);
                 if (i < result_size) {
                     sycl_classes::bitset bitsA, bitsB;
@@ -237,17 +243,12 @@ private:
                         bool bit_high = ((i >> (rankC + k)) & 1) != 0;
                         bool bit_low = ((i >> k) & 1) != 0;
 
-                        if (acc_indexesB[k] != 255) {
-                            bitsB.set(rankB + acc_indexesB[k], bit_high);
-                        } else {
-                            bitsA.set(rankA + acc_indexesA[k], bit_high);
-                        }
+                        if (acc_indexesB[k] != 255) bitsB.set(rankB + acc_indexesB[k], bit_high);
+                        else                        bitsA.set(rankA + acc_indexesA[k], bit_high);
 
-                        if (acc_indexesA[k] != 255) {
-                            bitsA.set(acc_indexesA[k], bit_low);
-                        } else {
-                            bitsB.set(acc_indexesB[k], bit_low);
-                        }
+
+                        if (acc_indexesA[k] != 255) bitsA.set(acc_indexesA[k], bit_low);
+                        else                        bitsB.set(acc_indexesB[k], bit_low);
                     }
 
                     cpx sum = 0;
@@ -271,9 +272,17 @@ private:
                     
                     acc_result[i] = sum;
                 }
-            }); });
-    }
-};
+            }); 
+        }).wait_and_throw();
+        } catch (sycl::exception const &e) {
+            std::cerr << "SYCL exception in general_contraction: " << e.what() << std::endl;
+            throw;
+        } catch (std::exception const &e) {
+            std::cerr << "Standard exception in general_contraction: " << e.what() << std::endl;
+            throw;
+        }
+        }
+    };
 
 struct sycl_gate_wrapper
 {
@@ -307,9 +316,12 @@ extern "C"
             gate_vector.push_back(std::move(wrapper));
         }
 
+        size_t threshold = num_qubits;
+        bool contraction = false;
         // go through the list of gate, when two consecutive gates perfectly match, contract them, put the result in place of the first gate and remove the second gate
         while (gate_vector.size() > 1)
         {
+            contraction = false;
             for (size_t i = 0; i < gate_vector.size() - 1; i++)
             {
                 // get the connections between the two gates 
@@ -318,36 +330,53 @@ extern "C"
                     gate_vector[i + 1]->span
                 );
 
-                // the qubits of the result are the union of the qubits of the two gates
-                std::vector<unsigned char> result_qubits;
-                for (size_t j = 0; j < gate_vector[i]->span.size(); j++) result_qubits.push_back(gate_vector[i]->span[j]);
-                for (size_t j = 0; j < gate_vector[i + 1]->span.size(); j++)
+                if (gate_vector[i]->span.size() == gate_vector[i + 1]->span.size() && 
+                    std::equal(gate_vector[i]->span.begin(), gate_vector[i]->span.end(), gate_vector[i + 1]->span.begin()) ||
+                    connections.size() >= threshold)
                 {
-                    if (std::find(result_qubits.begin(), result_qubits.end(), gate_vector[i + 1]->span[j]) == result_qubits.end())
-                    {
-                    result_qubits.push_back(gate_vector[i + 1]->span[j]);
-                    }
+                    std::vector<unsigned char> result_qubits;
+                    // first the qubits of only the first gate, then the ones in common and finally the qubits of only the second gate
+
+                    for (size_t j = 0; j < gate_vector[i]->span.size(); j++)
+                        if (std::find(connections.begin(), connections.end(), gate_vector[i]->span[j]) == connections.end())
+                            result_qubits.push_back(gate_vector[i]->span[j]);
+
+                    for (size_t j = 0; j < connections.size(); j++)
+                        result_qubits.push_back(connections[j]);
+
+                    for (size_t j = 0; j < gate_vector[i + 1]->span.size(); j++)
+                        if (std::find(connections.begin(), connections.end(), gate_vector[i + 1]->span[j]) == connections.end())
+                            result_qubits.push_back(gate_vector[i + 1]->span[j]);
+
+                    sort(result_qubits.begin(), result_qubits.end());
+
+                    // create a new gate with the result qubits
+                    auto result_gate = std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
+                        sycl::buffer<cpx>(sycl::range<1>(1 << (2 * result_qubits.size()))),
+                        result_qubits
+                    });
+
+                    // contract the two gates
+                    contractor.optimal_contraction(
+                        gate_vector[i]->unitary,     gate_vector[i + 1]->unitary,     result_gate->unitary,
+                        gate_vector[i]->span.size(), gate_vector[i + 1]->span.size(), result_qubits.size(),
+                        gate_vector[i]->span.data(), gate_vector[i + 1]->span.data(), result_qubits.data(),
+                        connections);
+
+                    // put the result in place of the first gate
+                    gate_vector[i] = std::move(result_gate);
+
+                    // remove the second gate
+                    gate_vector.erase(gate_vector.begin() + i + 1);
+
+                    contraction = true;
+
+                    break;
                 }
-
-                // create a new gate with the result qubits
-                auto result_gate = std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
-                    sycl::buffer<cpx>(sycl::range<1>(1 << (2 * result_qubits.size()))),
-                    result_qubits
-                });
-
-                // contract the two gates
-                contractor.optimal_contraction(gate_vector[i]->unitary, gate_vector[i + 1]->unitary, result_gate->unitary,
-                                gate_vector[i]->span.size(), gate_vector[i + 1]->span.size(), result_qubits.size(),
-                                gate_vector[i]->span.data(), gate_vector[i + 1]->span.data(), result_qubits.data(),
-                                connections);
-
-                // put the result in place of the first gate
-                gate_vector[i] = std::move(result_gate);
-
-                // remove the second gate
-                gate_vector.erase(gate_vector.begin() + i + 1);
-
-                break;
+            }
+            if (!contraction){
+                // std::cout << "No match" << std::endl;
+                threshold = threshold - 1 > 0 ? threshold - 1 : 1;
             }
         }
 

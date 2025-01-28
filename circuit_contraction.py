@@ -3,10 +3,16 @@ import time
 import sys
 
 from qiskit import QuantumCircuit
+from qiskit.circuit.random import random_circuit
 from qiskit.quantum_info import random_unitary
 from qiskit_aer import AerSimulator
 from qiskit.compiler import transpile
 from numpy import ctypeslib
+
+from qiskit.circuit import Gate
+from qiskit.circuit.library import UnitaryGate
+from qiskit.dagcircuit import DAGCircuit
+from qiskit.converters import circuit_to_dag, dag_to_circuit
 
 from ctypes import cdll
 import ctypes
@@ -61,22 +67,102 @@ def get_error(matrix1, matrix2):
     error = np.sqrt(np.sum(np.abs(diff) ** 2))
     return error
 
+def replace_swap_with_unitary(circuit: QuantumCircuit) -> QuantumCircuit:
+    """
+    Replace SWAP, controlled-SWAP, X, CX, and CCX gates in a quantum circuit with custom unitary gates,
+    preserving the original position of each gate.
+    
+    Args:
+        circuit (QuantumCircuit): Input quantum circuit
+        
+    Returns:
+        QuantumCircuit: Modified circuit with SWAP, CSWAP, X, CX, and CCX gates replaced by custom unitaries
+    """
+    # Define the SWAP unitary matrix
+    swap_unitary = np.array([[1, 0, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 0, 1]])
+    
+    # Define the X (NOT) gate unitary matrix
+    x_unitary = np.array([[0, 1],
+                         [1, 0]])
+    
+    # Create controlled version of the SWAP unitary (8x8 matrix)
+    # Initialize with identity matrix
+    cswap_unitary = np.eye(8)
+    # When control qubit is |1⟩, apply SWAP
+    cswap_unitary[4:8, 4:8] = swap_unitary
+    
+    # Create controlled-X (CNOT) unitary (4x4 matrix)
+    # Initialize with identity matrix
+    cx_unitary = np.eye(4)
+    # When control qubit is |1⟩, apply X
+    cx_unitary[2:4, 2:4] = x_unitary
+    
+    # Create controlled-controlled-X (Toffoli) unitary (8x8 matrix)
+    # Initialize with identity matrix
+    ccx_unitary = np.eye(8)
+    # When both control qubits are |1⟩, apply X
+    ccx_unitary[6:8, 6:8] = x_unitary
+    
+    # Create the custom gates
+    custom_swap = UnitaryGate(swap_unitary, label='CustomSWAP')
+    custom_cswap = UnitaryGate(cswap_unitary, label='CustomCSWAP')
+    custom_x = UnitaryGate(x_unitary, label='CustomX')
+    custom_cx = UnitaryGate(cx_unitary, label='CustomCX')
+    custom_ccx = UnitaryGate(ccx_unitary, label='CustomCCX')
+    
+    # Create a new circuit with the same number of qubits and classical bits
+    new_circuit = QuantumCircuit(circuit.num_qubits, circuit.num_clbits)
+    
+    # Iterate through the circuit instructions using the new attribute access method
+    for instruction in circuit.data:
+        operation = instruction.operation
+        qubits = instruction.qubits
+        clbits = instruction.clbits
+        
+        if operation.name == 'swap':
+            # Replace SWAP with custom unitary
+            new_circuit.append(custom_swap, qubits)
+        elif operation.name == 'cswap':
+            # Replace controlled-SWAP with custom controlled unitary
+            new_circuit.append(custom_cswap, qubits)
+        elif operation.name == 'x':
+            # Replace X (NOT) with custom unitary
+            new_circuit.append(custom_x, qubits)
+        elif operation.name == 'cx':
+            # Replace CX (CNOT) with custom controlled unitary
+            new_circuit.append(custom_cx, qubits)
+        elif operation.name == 'ccx':
+            # Replace CCX (Toffoli) with custom controlled-controlled unitary
+            new_circuit.append(custom_ccx, qubits)
+        else:
+            # Keep other gates as they are
+            new_circuit.append(operation, qubits, clbits)
+    
+    return new_circuit
+
 def circuit_contraction_test(num_qubits):
     # create a circuit with a gate spanning all 10 qubits and one spanning the first 9
     circuit = QuantumCircuit(num_qubits)
-    depth = 100
+    depth = 300
 
-    seed = 42
+    seed = 0
     np.random.seed(seed)
 
     ## create 100 random unitaries
     for _ in range(depth):
-        # qubits_chosen, num_qubits_chosen = pick_random_qubits(num_qubits, seed)
-        qubits_chosen = list(range(num_qubits))
-        num_qubits_chosen = num_qubits
+        qubits_chosen, num_qubits_chosen = pick_random_qubits(num_qubits, seed)
+        # qubits_chosen = list(range(num_qubits))
+        # num_qubits_chosen = num_qubits
         circuit.unitary(create_random_unitary(num_qubits_chosen, seed), qubits_chosen)
 
-    # add a gigantic identity gate
+
+    # circuit = random_circuit(num_qubits, depth=300, seed=0, max_operands=4)
+
+    # circuit = replace_swap_with_unitary(circuit)
+
     circuit.unitary(np.eye(2**num_qubits), list(range(num_qubits)))
 
     return circuit
@@ -185,6 +271,12 @@ def circuit_contraction():
     # print("The two matrices are:")
     # print(unitary_matrix)
     # print(unitary_matrix_cpp)
+
+    # gate_list = get_gate_list(qc)
+    # print(gate_list[-1].unitary)
+    # print("The gates are:")
+    # for gate in gate_list:
+    #     print(gate.unitary)
 
     print(f'Qiskit execution time: {execution_time_ms} ms')
     print(f'C++ execution time: {execution_time_ms_cpp} ms')
