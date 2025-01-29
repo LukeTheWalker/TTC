@@ -4,6 +4,7 @@
 #include <iostream>
 #include <sycl/sycl.hpp>
 #include <vector>
+#include <chrono>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -145,8 +146,8 @@ private:
         // Calculate matrix dimension
         const int n = 1 << size; // Matrix dimension is 2^size
 
-        try
-        {
+        // try
+        // {
             queue_.submit([&](sycl::handler &h)
                           {
                 auto a = A.get_access<sycl::access::mode::read>(h);
@@ -169,19 +170,18 @@ private:
                         }
                         c[row * n + col] = sum;
                     }
-                ); })
-                .wait_and_throw();
-        }
-        catch (sycl::exception const &e)
-        {
-            std::cerr << "SYCL exception caught: " << e.what() << std::endl;
-            throw;
-        }
-        catch (std::exception const &e)
-        {
-            std::cerr << "Standard exception caught: " << e.what() << std::endl;
-            throw;
-        }
+                ); });//.wait_and_throw();
+        // }
+        // catch (sycl::exception const &e)
+        // {
+        //     std::cerr << "SYCL exception caught: " << e.what() << std::endl;
+        //     throw;
+        // }
+        // catch (std::exception const &e)
+        // {
+        //     std::cerr << "Standard exception caught: " << e.what() << std::endl;
+        //     throw;
+        // }
     }
     // Previous general_contraction implementation remains the same
     void general_contraction(sycl::buffer<cpx> &A, sycl::buffer<cpx> &B,
@@ -220,7 +220,7 @@ private:
         const size_t result_size = 1 << (rankC * 2);
         const size_t WORK_GROUP_SIZE = 256;
 
-        try {
+        // try {
             queue_.submit([&](sycl::handler &h)
             {
                 auto acc_A = A.get_access<sycl::access::mode::read>(h);
@@ -273,14 +273,14 @@ private:
                     acc_result[i] = sum;
                 }
             }); 
-        }).wait_and_throw();
-        } catch (sycl::exception const &e) {
-            std::cerr << "SYCL exception in general_contraction: " << e.what() << std::endl;
-            throw;
-        } catch (std::exception const &e) {
-            std::cerr << "Standard exception in general_contraction: " << e.what() << std::endl;
-            throw;
-        }
+        });//.wait_and_throw();
+        // } catch (sycl::exception const &e) {
+        //     std::cerr << "SYCL exception in general_contraction: " << e.what() << std::endl;
+        //     throw;
+        // } catch (std::exception const &e) {
+        //     std::cerr << "Standard exception in general_contraction: " << e.what() << std::endl;
+        //     throw;
+        // }
         }
     };
 
@@ -303,6 +303,8 @@ extern "C"
 
     void contract_circuit(gate *gates, size_t num_gates, cpx *result_gate, size_t num_qubits)
     {
+        auto start = std::chrono::high_resolution_clock::now();
+
         static TensorContractor contractor;
 
         // make a vector holding the pointer to the gates
@@ -338,11 +340,7 @@ extern "C"
                     // first the qubits of only the first gate, then the ones in common and finally the qubits of only the second gate
 
                     for (size_t j = 0; j < gate_vector[i]->span.size(); j++)
-                        if (std::find(connections.begin(), connections.end(), gate_vector[i]->span[j]) == connections.end())
-                            result_qubits.push_back(gate_vector[i]->span[j]);
-
-                    for (size_t j = 0; j < connections.size(); j++)
-                        result_qubits.push_back(connections[j]);
+                        result_qubits.push_back(gate_vector[i]->span[j]);
 
                     for (size_t j = 0; j < gate_vector[i + 1]->span.size(); j++)
                         if (std::find(connections.begin(), connections.end(), gate_vector[i + 1]->span[j]) == connections.end())
@@ -370,15 +368,17 @@ extern "C"
                     gate_vector.erase(gate_vector.begin() + i + 1);
 
                     contraction = true;
-
-                    break;
                 }
             }
             if (!contraction){
-                // std::cout << "No match" << std::endl;
+                // std::cout << "No match" << std::endl
                 threshold = threshold - 1 > 0 ? threshold - 1 : 1;
             }
         }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> elapsed = end - start;
+        // std::cout << "Elapsed time: " << elapsed.count() << " ms\n";
 
         // copy the result to the output gate
         auto acc = gate_vector[0]->unitary.get_host_access(sycl::read_only);

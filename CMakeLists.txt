@@ -13,6 +13,9 @@ set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_C_COMPILER "icx")
 set(CMAKE_CXX_COMPILER "icpx")
 
+# Find OpenMP package
+find_package(OpenMP REQUIRED)
+
 # Specify the C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -23,7 +26,7 @@ if (USE_FLOAT)
     add_definitions(-DUSE_FLOAT)
 endif()
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -fsycl-targets=nvptx64-nvidia-cuda")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsycl -fsycl-targets=nvptx64-nvidia-cuda -qopenmp")
 
 include_directories(${PROJECT_SOURCE_DIR}/include)
 
@@ -34,3 +37,6 @@ file(GLOB_RECURSE CPP_SOURCES
 
 # Create the shared library
 add_library(TTC SHARED ${CPP_SOURCES})
+
+# Link OpenMP
+target_link_libraries(TTC PUBLIC OpenMP::OpenMP_CXX)
