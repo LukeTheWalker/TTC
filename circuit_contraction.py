@@ -146,25 +146,30 @@ def replace_swap_with_unitary(circuit: QuantumCircuit) -> QuantumCircuit:
 def circuit_contraction_test(num_qubits):
     # create a circuit with a gate spanning all 10 qubits and one spanning the first 9
     circuit = QuantumCircuit(num_qubits)
-    depth = 300
+    depth = 100
 
     seed = 0
     np.random.seed(seed)
 
-    ## create 100 random unitaries
-    for _ in range(depth):
-        qubits_chosen, num_qubits_chosen = pick_random_qubits(num_qubits, seed)
-        # qubits_chosen = list(range(num_qubits))
-        # num_qubits_chosen = num_qubits
-        circuit.unitary(create_random_unitary(num_qubits_chosen, seed), qubits_chosen)
+    # ## create 100 random unitaries
+    # for _ in range(depth):
+    #     qubits_chosen, num_qubits_chosen = pick_random_qubits(num_qubits, seed)
+    #     # qubits_chosen = list(range(num_qubits))
+    #     # num_qubits_chosen = num_qubits
+    #     circuit.unitary(create_random_unitary(num_qubits_chosen, seed), qubits_chosen)
 
 
-    # circuit = random_circuit(num_qubits, depth=300, seed=0, max_operands=4)
+    circuit = random_circuit(num_qubits, depth=depth, seed=seed, max_operands=4)
 
-    # circuit = replace_swap_with_unitary(circuit)
+    # simulator = AerSimulator(method='unitary', device='GPU')
+    # circuit = transpile(circuit, simulator)
 
-    circuit.unitary(np.eye(2**num_qubits), list(range(num_qubits)))
+    circuit = replace_swap_with_unitary(circuit)
 
+    # circuit.unitary(np.eye(2**num_qubits), list(range(num_qubits)))
+
+    print(circuit)
+    
     return circuit
 
 def get_unitary_with_qiskit(qc):
@@ -265,7 +270,6 @@ def circuit_contraction():
         cpp_times.remove(max(cpp_times))
         cpp_times.remove(min(cpp_times))
 
-    execution_time_ms = np.mean(qiskit_times)
     execution_time_ms_cpp = np.mean(cpp_times) 
 
     # print("The two matrices are:")
@@ -278,9 +282,13 @@ def circuit_contraction():
     # for gate in gate_list:
     #     print(gate.unitary)
 
-    print(f'Qiskit execution time: {execution_time_ms} ms')
     print(f'C++ execution time: {execution_time_ms_cpp} ms')
+    if sanity_check:
+        print("Performed sanity check")
+        
     if num_qubits <= 10 and not sanity_check:
+        execution_time_ms = np.mean(qiskit_times)
+        print(f'Qiskit execution time: {execution_time_ms} ms')
         print(f'Error between Qiskit and C++: {get_error(unitary_matrix, unitary_matrix_cpp)}')
 
 if __name__ == '__main__':
