@@ -6,6 +6,7 @@
 #include <queue>
 #include <sycl/sycl.hpp>
 #include <vector>
+#include <type_traits>
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -20,6 +21,21 @@ struct gate
     unsigned char *qubits;
     cpx *unitary;
     size_t rank;
+};
+
+struct contraction_t
+{
+    size_t g1; ///< Index of the first gate.
+    size_t g2; ///< Index of the second gate.
+    size_t g1i;
+    size_t g2i;
+    std::vector<unsigned char> connections; ///< Common qubits shared between the two gates.
+};
+
+struct sycl_gate_wrapper
+{
+    cpx* unitary;
+    std::vector<unsigned char> span;
 };
 
 // Previous helper functions remain the same
@@ -259,14 +275,250 @@ public:
         sycl::free(A, queue_);
         sycl::free(B, queue_);
     }
-};
+    
+    template <typename T>
+    void scan_array(const std::vector<T>& array, std::vector<size_t>& scan_array)
+    {
+        scan_array.resize(array.size() + 1);
+        scan_array[0] = 0;
+        for (size_t i = 0; i < array.size(); i++)
+        {
+            if constexpr (std::is_arithmetic_v<T>)
+            {
+                scan_array[i + 1] = scan_array[i] + array[i];
+            }
+            else
+            {
+                scan_array[i + 1] = scan_array[i] + array[i].size();
+            }
+        }
+    }
 
-struct sycl_gate_wrapper
-{
-    cpx* unitary;
-    std::vector<unsigned char> span;
-};
+    void general_batched_contraction(std::vector<cpx *> &A, std::vector<cpx *> &B, std::vector<cpx *> &result,
+                                    std::vector<size_t> &rankA, std::vector<size_t> &rankB, std::vector<size_t> &rankC,
+                                    std::vector<const unsigned char *> &spanA, std::vector<const unsigned char *> &spanB, std::vector<const unsigned char *> &spanC,
+                                    const std::vector<std::vector<unsigned char>> &all_connections)
+    {
+        std::vector<size_t> scan_rankC;
+        scan_array(rankC, scan_rankC);
 
+        std::vector<unsigned char> num_connections;
+        for (size_t i = 0; i < all_connections.size(); i++) num_connections.push_back(all_connections[i].size());
+
+        std::vector<size_t> scan_connections;
+        scan_array(num_connections, scan_connections);
+
+        std::vector<unsigned char> indexesA(scan_rankC.back());
+        std::vector<unsigned char> indexesB(scan_rankC.back());
+        std::vector<unsigned char> indexes_connectionsA(scan_connections.back());
+        std::vector<unsigned char> indexes_connectionsB(scan_connections.back());
+
+        #pragma omp parallel for
+        for (size_t i = 0; i < all_connections.size(); i++)
+        {
+            for (size_t j = 0; j < rankC[i]; j++)
+            {
+                indexesA[scan_rankC[i] + j] = getIndexInSet(spanA[i], spanC[i][j], rankA[i]);
+                indexesB[scan_rankC[i] + j] = getIndexInSet(spanB[i], spanC[i][j], rankB[i]);
+            }
+        }
+
+
+        #pragma omp parallel for
+        for (size_t i = 0; i < all_connections.size(); i++) {
+            for (size_t j = 0; j < all_connections[i].size(); j++) {
+                indexes_connectionsA[scan_connections[i] + j] = getIndexInSet(spanA[i], all_connections[i][j], rankA[i]);
+                indexes_connectionsB[scan_connections[i] + j] = getIndexInSet(spanB[i], all_connections[i][j], rankB[i]);
+            }
+        }
+
+        sycl::buffer<unsigned char> buf_indexesA(indexesA);
+        sycl::buffer<unsigned char> buf_indexesB(indexesB);
+        sycl::buffer<unsigned char> buf_connectionsA(indexes_connectionsA);
+        sycl::buffer<unsigned char> buf_connectionsB(indexes_connectionsB);
+        sycl::buffer<size_t> buf_scan_rankC(scan_rankC);
+        sycl::buffer<cpx*> buf_A(A.data(), A.size()), buf_B(B.data(), B.size()), buf_result(result.data(), result.size());
+        sycl::buffer<size_t> buf_rankC(rankC), buf_rankA(rankA), buf_rankB(rankB);
+        sycl::buffer<unsigned char> buf_num_connections(num_connections);
+        sycl::buffer<size_t> buf_scan_connections(scan_connections);
+
+        size_t nels = 0;
+        for (size_t i = 0; i < rankC.size(); i++)
+        {
+            nels += 1 << (2 * rankC[i]);
+        }
+
+        const size_t WORK_GROUP_SIZE = 32;
+        const size_t batch_size = rankC.size();
+
+        queue_.submit([&](sycl::handler &h)
+        {
+            auto acc_indexesA = buf_indexesA.get_access<sycl::access::mode::read>(h);
+            auto acc_indexesB = buf_indexesB.get_access<sycl::access::mode::read>(h);
+            auto acc_connectionsA = buf_connectionsA.get_access<sycl::access::mode::read>(h);
+            auto acc_connectionsB = buf_connectionsB.get_access<sycl::access::mode::read>(h);
+            auto acc_scan_rankC = buf_scan_rankC.get_access<sycl::access::mode::read>(h);
+            auto acc_num_connections = buf_num_connections.get_access<sycl::access::mode::read>(h);
+            auto acc_scan_connections = buf_scan_connections.get_access<sycl::access::mode::read>(h);
+            auto acc_rankA = buf_rankA.get_access<sycl::access::mode::read>(h);
+            auto acc_rankB = buf_rankB.get_access<sycl::access::mode::read>(h);
+            auto acc_rankC = buf_rankC.get_access<sycl::access::mode::read>(h);
+            auto acc_A = buf_A.get_access<sycl::access::mode::read>(h);
+            auto acc_B = buf_B.get_access<sycl::access::mode::read>(h);
+            auto acc_result = buf_result.get_access<sycl::access::mode::write>(h);
+
+            sycl::range<1> global{((nels + WORK_GROUP_SIZE - 1) / WORK_GROUP_SIZE) * WORK_GROUP_SIZE};
+            sycl::range<1> local{WORK_GROUP_SIZE};
+
+            h.parallel_for(sycl::nd_range<1>{global, local}, [=](sycl::nd_item<1> item) {
+            
+            const size_t gid = item.get_global_id(0);
+
+            size_t batch_idx = 0;
+            size_t result_offset = 0;
+            for (size_t j = 0; j < batch_size; j++)
+            {
+                size_t n = 1 << (2 * acc_rankC[j]);
+                if (gid < result_offset + n)
+                {
+                    batch_idx = j;
+                    break;
+                }
+                result_offset += n;
+            }
+
+            if (gid < nels) {
+                size_t i = gid - result_offset;
+                sycl_classes::bitset bitsA, bitsB;
+
+                for (size_t k = 0; k < acc_rankC[batch_idx]; k++) {
+                    bool bit_high = ((i >> (acc_rankC[batch_idx] + k)) & 1) != 0;
+                    bool bit_low = ((i >> k) & 1) != 0;
+                
+                    size_t idx = acc_scan_rankC[batch_idx] + k;
+                    if (acc_indexesB[idx] != 255) bitsB.set(acc_rankB[batch_idx] + acc_indexesB[idx], bit_high);
+                    else                          bitsA.set(acc_rankA[batch_idx] + acc_indexesA[idx], bit_high);
+                
+                    if (acc_indexesA[idx] != 255) bitsA.set(acc_indexesA[idx], bit_low);
+                    else                          bitsB.set(acc_indexesB[idx], bit_low);
+                }
+
+                cpx sum = 0;
+                sum += acc_A[batch_idx][bitsA.to_ulong()] * acc_B[batch_idx][bitsB.to_ulong()];
+                size_t old_gray = 0;
+                
+                for (size_t m = 1; m < (1 << acc_num_connections[batch_idx]); m++) {
+                    size_t gray_code = m ^ (m >> 1);
+                    unsigned int position_vacant = sycl_ffsll(gray_code ^ old_gray) - 1;
+                    
+                    size_t conn_idx = acc_scan_connections[batch_idx] + position_vacant;
+                    unsigned char indexA = acc_connectionsA[conn_idx];
+                    unsigned char indexB = acc_connectionsB[conn_idx];
+
+                    bitsA.xor_op(1ULL << (acc_rankA[batch_idx] + indexA));
+                    bitsB.xor_op(1ULL << indexB);
+                    
+                    sum += acc_A[batch_idx][bitsA.to_ulong()] * acc_B[batch_idx][bitsB.to_ulong()];
+                    
+                    old_gray = gray_code;
+                }
+                
+                acc_result[batch_idx][i] = sum;
+            }
+
+            });
+        });
+
+        for (size_t i = 0; i < rankC.size(); i++)
+        {
+            sycl::free(A[i], queue_);
+            sycl::free(B[i], queue_);
+        }
+    }
+
+
+    void batched_contraction(
+        std::vector<contraction_t>& batch,
+        std::vector<std::unique_ptr<sycl_gate_wrapper>>& gate_vector,
+        std::vector<size_t>& gate_pointer,
+        size_t num_qubits)
+    {
+        std::vector<cpx *> A(batch.size()); 
+        std::vector<cpx *> B(batch.size()); 
+        std::vector<cpx *> C(batch.size());
+        std::vector<const unsigned char *> spanA(batch.size()); 
+        std::vector<const unsigned char *> spanB(batch.size()); 
+        std::vector<const unsigned char *> spanC(batch.size());
+        std::vector<size_t> rankA(batch.size()); 
+        std::vector<size_t> rankB(batch.size()); 
+        std::vector<size_t> rankC(batch.size());
+        std::vector<std::vector<unsigned char>> all_connections(batch.size());
+        
+        // Store the indices where new gates will be inserted
+        std::vector<size_t> new_gate_indices;
+        size_t base_size = gate_vector.size();
+        
+        // First pass: create all new gates
+        for (size_t i = 0; i < batch.size(); i++) {
+            std::vector<unsigned char> result_qubits;
+            result_qubits.insert(result_qubits.end(), 
+                gate_vector[batch[i].g1]->span.begin(), 
+                gate_vector[batch[i].g1]->span.end());
+            result_qubits.insert(result_qubits.end(), 
+                gate_vector[batch[i].g2]->span.begin(), 
+                gate_vector[batch[i].g2]->span.end());
+            
+            sort(result_qubits.begin(), result_qubits.end());
+            result_qubits.erase(unique(result_qubits.begin(), result_qubits.end()), 
+                               result_qubits.end());
+    
+            // Create new gate
+            gate_vector.push_back(std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
+                sycl::malloc_device<cpx>(1 << (2 * result_qubits.size()), queue_),
+                std::move(result_qubits)
+            }));
+            
+            new_gate_indices.push_back(gate_vector.size() - 1);
+            
+            // Set up contraction inputs
+            A[i] = gate_vector[batch[i].g1]->unitary;
+            B[i] = gate_vector[batch[i].g2]->unitary;
+            C[i] = gate_vector.back()->unitary;
+            spanA[i] = gate_vector[batch[i].g1]->span.data();
+            spanB[i] = gate_vector[batch[i].g2]->span.data();
+            spanC[i] = gate_vector.back()->span.data();
+            rankA[i] = gate_vector[batch[i].g1]->span.size();
+            rankB[i] = gate_vector[batch[i].g2]->span.size();
+            rankC[i] = gate_vector.back()->span.size();
+            all_connections[i] = batch[i].connections;
+        }
+    
+        // Perform the batched contraction
+        general_batched_contraction(A, B, C, rankA, rankB, rankC, 
+                                  spanA, spanB, spanC, all_connections);
+    
+        // Update gate pointers and cleanup
+        std::vector<size_t> indices_to_remove;
+        for (size_t i = 0; i < batch.size(); i++) {
+            // Store higher index first to maintain validity when erasing
+            indices_to_remove.push_back(batch[i].g2i);
+            
+            // Update the pointer to the new gate
+            gate_pointer[batch[i].g1i] = new_gate_indices[i];
+        }
+        
+        // Sort in descending order to remove from back to front
+        std::sort(indices_to_remove.begin(), indices_to_remove.end(), 
+                  std::greater<size_t>());
+        
+        // Remove processed gates
+        for (size_t idx : indices_to_remove) {
+            gate_pointer.erase(gate_pointer.begin() + idx);
+        }
+        
+        batch.clear();
+    }
+};
 extern "C"
 {
     void single_contraction(cpx *A, cpx *B, cpx *C,
@@ -304,11 +556,18 @@ extern "C"
         size_t threshold = num_qubits;
         bool contraction = false;
 
+        std::vector<contraction_t> batch;
+
         while (gate_pointer.size() > 1)
         {
+            std::vector<bool> batched(gate_pointer.size(), false);
+
             contraction = false;
             for (size_t ii = 0; ii < gate_pointer.size() - 1; ii++)
             {
+                // print batched array
+                if (batch.size() >= 10) break;
+                if (batched[ii] || batched[ii + 1]) continue;
                 size_t g1 = gate_pointer[ii];
                 size_t g2 = gate_pointer[ii + 1];
                 // get the connections between the two gates
@@ -319,50 +578,19 @@ extern "C"
 
                 if ( connections.size() >= threshold )
                 {
-                    std::vector<unsigned char> result_qubits;
-
-                    result_qubits.insert(result_qubits.end(), gate_vector[g1]->span.begin(), gate_vector[g1]->span.end());
-                    result_qubits.insert(result_qubits.end(), gate_vector[g2]->span.begin(), gate_vector[g2]->span.end());
-
-                    sort(result_qubits.begin(), result_qubits.end());
-
-                    result_qubits.erase(unique(result_qubits.begin(), result_qubits.end()), result_qubits.end());
-
-                    // create a new gate with the result qubits
-                    gate_vector.push_back(std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
-                        sycl::malloc_device<cpx>(1 << (2 * result_qubits.size()), contractor.queue_),
-                        std::move(result_qubits)}));
-
-                    // contract the two gates
-                    contractor.optimal_contraction(
-                        gate_vector[g1]->unitary, gate_vector[g2]->unitary, gate_vector.back()->unitary,
-                        gate_vector[g1]->span.size(), gate_vector[g2]->span.size(), gate_vector.back()->span.size(),
-                        gate_vector[g1]->span.data(), gate_vector[g2]->span.data(), gate_vector.back()->span.data(),
-                        connections);
-
-                    gate_pointer[ii] = gate_vector.size() - 1;
-
-                    // remove the second gate
-                    gate_pointer.erase(gate_pointer.begin() + ii + 1);
-
+                    batch.push_back(contraction_t{g1, g2, ii, ii + 1, connections});
+                    batched[ii] = true;
+                    batched[ii + 1] = true;
+                    
                     ii--;
-
-                    // print the gate_pointer array
-                    // for (size_t i = 0; i < gate_pointer.size(); i++)
-                    // {
-                    //     std::cout << gate_pointer[i] << " ";
-                    // }
-                    // std::cout << std::endl;
-
                     contraction = true;
                 }
             }
             if (!contraction) threshold = threshold - 1 >= 0 ? threshold - 1 : 0;
+            else {contractor.batched_contraction(batch, gate_vector, gate_pointer, num_qubits); batch.clear();}
+                    
         }
 
-        // copy the result to the output gate
-        // auto acc = gate_vector[gate_pointer[0]]->unitary.get_host_access(sycl::read_only);
-        // std::copy(acc.get_pointer(), acc.get_pointer() + (1 << (2 * num_qubits)), result_gate);
         contractor.queue_.memcpy(result_gate, gate_vector[gate_pointer[0]]->unitary, sizeof(cpx) * (1 << (2 * num_qubits))).wait();
     }
 }
