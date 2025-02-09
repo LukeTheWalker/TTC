@@ -566,7 +566,7 @@ extern "C"
             for (size_t ii = 0; ii < gate_pointer.size() - 1; ii++)
             {
                 // print batched array
-                if (batch.size() >= 10) break;
+                // if (batch.size() >= 10) break;
                 if (batched[ii] || batched[ii + 1]) continue;
                 size_t g1 = gate_pointer[ii];
                 size_t g2 = gate_pointer[ii + 1];
