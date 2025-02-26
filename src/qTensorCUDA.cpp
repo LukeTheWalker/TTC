@@ -7,6 +7,8 @@
 #include <sycl/sycl.hpp>
 #include <vector>
 #include <type_traits>
+#include <oneapi/math.hpp>
+
 
 #ifdef USE_FLOAT
 using dtype = float;
@@ -106,9 +108,9 @@ public:
         }
     }
 
-    void optimal_contraction(cpx * buf_A,
-                             cpx * buf_B,
-                             cpx * buf_result,
+    void optimal_contraction(cpx * A,
+                             cpx * B,
+                             cpx * result,
                              const size_t rankA,
                              const size_t rankB,
                              const size_t rankC,
@@ -118,21 +120,17 @@ public:
                              const std::vector<unsigned char> &connections)
 
     {
-        general_contraction(buf_A, buf_B, buf_result,
-                            rankA, rankB, rankC,
-                            spanA, spanB, spanC,
-                            connections);
-        // if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB))
-        // {
-        //     mkl_matrix_multiply(buf_A, buf_B, buf_result, rankC);
-        // }
-        // else
-        // {
-        //     general_contraction(buf_A, buf_B, buf_result,
-        //                         rankA, rankB, rankC,
-        //                         spanA, spanB, spanC,
-        //                         connections);
-        // }
+        if (rankA == rankB && std::equal(spanA, spanA + rankA, spanB))
+        {
+            onemath_matrix_multiply(A, B, result, rankC);
+        }
+        else
+        {
+            general_contraction(A, B, result,
+                                rankA, rankB, rankC,
+                                spanA, spanB, spanC,
+                                connections);
+        }
     }
 
     void single_contraction(cpx *A, cpx *B, cpx *C,
@@ -153,37 +151,19 @@ public:
 
     sycl::queue queue_;
 
-    void mkl_matrix_multiply(sycl::buffer<cpx> &A, sycl::buffer<cpx> &B,
-                             sycl::buffer<cpx> &C, size_t size)
+    void onemath_matrix_multiply(cpx *A, cpx *B, cpx *C, size_t rankC)
     {
+        // Create SYCL buffers and perform multiplication
+        size_t result_size = (1 << (2 * rankC));
+        sycl::buffer<cpx> buf_A(A, sycl::range<1>(result_size));
+        sycl::buffer<cpx> buf_B(B, sycl::range<1>(result_size));
+        sycl::buffer<cpx> buf_C(C, sycl::range<1>(result_size));
 
-        // Calculate matrix dimension
-        const int n = 1 << size; // Matrix dimension is 2^size
-
-        queue_.submit([&](sycl::handler &h)
-            {
-                auto a = A.get_access<sycl::access::mode::read>(h);
-                auto b = B.get_access<sycl::access::mode::read>(h);
-                auto c = C.get_access<sycl::access::mode::write>(h);
-
-                const int TILE_SIZE = 32;  // Optimal for V100's architecture
-                
-                h.parallel_for(
-                    sycl::range<2>(n, n),
-                    [=](sycl::id<2> idx) {
-                        const int row = idx[0];
-                        const int col = idx[1];
-                        
-                        cpx sum(0.0, 0.0);
-                        for (int k = 0; k < n; k += TILE_SIZE) {
-                            for (int t = 0; t < TILE_SIZE && k + t < n; t++) {
-                                sum += a[row * n + (k + t)] * b[(k + t) * n + col];
-                            }
-                        }
-                        c[row * n + col] = sum;
-                    }
-                ); 
-            });
+        oneapi::math::blas::column_major::gemm(queue_, oneapi::math::transpose::nontrans, oneapi::math::transpose::nontrans, 
+                                               size, size, size, 
+                                               cpx(1.0, 0), 
+                                               buf_B, size, buf_A, size, 
+                                               cpx(0.0, 0.0), buf_C, size);
     }
 
     void general_contraction(cpx * A, cpx * B, cpx * result,

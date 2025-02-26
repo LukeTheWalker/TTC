@@ -39,4 +39,7 @@ file(GLOB_RECURSE CPP_SOURCES
 add_library(TTC SHARED ${CPP_SOURCES})
 
 # Link OpenMP
-target_link_libraries(TTC PUBLIC OpenMP::OpenMP_CXX)
+# target_link_libraries(TTC PUBLIC OpenMP::OpenMP_CXX)
+
+find_package(oneMath REQUIRED)
+target_link_libraries(TTC PRIVATE onemath)
