@@ -154,16 +154,14 @@ public:
     void onemath_matrix_multiply(cpx *A, cpx *B, cpx *C, size_t rankC)
     {
         // Create SYCL buffers and perform multiplication
-        size_t result_size = (1 << (2 * rankC));
+        size_t result_size = (1 << (rankC * 2));
+        size_t leading = 1 << rankC;
         sycl::buffer<cpx> buf_A(A, sycl::range<1>(result_size));
         sycl::buffer<cpx> buf_B(B, sycl::range<1>(result_size));
         sycl::buffer<cpx> buf_C(C, sycl::range<1>(result_size));
 
         oneapi::math::blas::column_major::gemm(queue_, oneapi::math::transpose::nontrans, oneapi::math::transpose::nontrans, 
-                                               size, size, size, 
-                                               cpx(1.0, 0), 
-                                               buf_B, size, buf_A, size, 
-                                               cpx(0.0, 0.0), buf_C, size);
+            leading, leading, leading, cpx(1.0), buf_A, leading, buf_B, leading, cpx(0.0), buf_C, leading);
     }
 
     void general_contraction(cpx * A, cpx * B, cpx * result,
