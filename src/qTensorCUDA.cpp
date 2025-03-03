@@ -414,67 +414,104 @@ public:
         }
     }
 
+    struct batch_metadata {
+        std::vector<contraction_t>& batch;
+        std::vector<cpx*> A;
+        std::vector<cpx*> B;
+        std::vector<cpx*> C;
+        std::vector<size_t> rankA;
+        std::vector<size_t> rankB;
+        std::vector<size_t> rankC;
+        std::vector<const unsigned char*> spanA;
+        std::vector<const unsigned char*> spanB;
+        std::vector<const unsigned char*> spanC;
+        std::vector<std::vector<unsigned char>> all_connections;
+
+        batch_metadata(
+            std::vector<contraction_t>& batch, 
+            std::vector<size_t> & new_gate_indices,
+            std::vector<std::unique_ptr<sycl_gate_wrapper>>& gate_vector,
+            sycl::queue queue_
+        ) : batch(batch) {
+            A = std::vector<cpx*>(batch.size());
+            B = std::vector<cpx*>(batch.size());
+            C = std::vector<cpx*>(batch.size());
+            rankA = std::vector<size_t>(batch.size());
+            rankB = std::vector<size_t>(batch.size());
+            rankC = std::vector<size_t>(batch.size());
+            spanA = std::vector<const unsigned char*>(batch.size());
+            spanB = std::vector<const unsigned char*>(batch.size());
+            spanC = std::vector<const unsigned char*>(batch.size());
+            all_connections = std::vector<std::vector<unsigned char>>(batch.size());
+
+            // First pass: create all new gates for batched contractions
+            for (size_t i = 0; i < batch.size(); i++) {
+                std::vector<unsigned char> result_qubits;
+                result_qubits.insert(result_qubits.end(), 
+                    gate_vector[batch[i].g1]->span.begin(), 
+                    gate_vector[batch[i].g1]->span.end());
+                result_qubits.insert(result_qubits.end(), 
+                    gate_vector[batch[i].g2]->span.begin(), 
+                    gate_vector[batch[i].g2]->span.end());
+                
+                sort(result_qubits.begin(), result_qubits.end());
+                result_qubits.erase(unique(result_qubits.begin(), result_qubits.end()), 
+                                result_qubits.end());
+        
+                // Create new gate
+                gate_vector.push_back(std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
+                    sycl::malloc_device<cpx>(1 << (2 * result_qubits.size()), queue_),
+                    std::move(result_qubits)
+                }));
+                
+                new_gate_indices.push_back(gate_vector.size() - 1);
+                
+                // Set up contraction inputs
+                A[i] = gate_vector[batch[i].g1]->unitary;
+                B[i] = gate_vector[batch[i].g2]->unitary;
+                C[i] = gate_vector.back()->unitary;
+                spanA[i] = gate_vector[batch[i].g1]->span.data();
+                spanB[i] = gate_vector[batch[i].g2]->span.data();
+                spanC[i] = gate_vector.back()->span.data();
+                rankA[i] = gate_vector[batch[i].g1]->span.size();
+                rankB[i] = gate_vector[batch[i].g2]->span.size();
+                rankC[i] = gate_vector.back()->span.size();
+                all_connections[i] = batch[i].connections;
+            }
+
+        }
+    };
 
     void batched_contraction(
         std::vector<contraction_t>& batch,
+        std::vector<contraction_t>& oneMath_batch,
         std::vector<std::unique_ptr<sycl_gate_wrapper>>& gate_vector,
         std::vector<size_t>& gate_pointer,
         size_t num_qubits)
     {
-        std::vector<cpx *> A(batch.size()); 
-        std::vector<cpx *> B(batch.size()); 
-        std::vector<cpx *> C(batch.size());
-        std::vector<const unsigned char *> spanA(batch.size()); 
-        std::vector<const unsigned char *> spanB(batch.size()); 
-        std::vector<const unsigned char *> spanC(batch.size());
-        std::vector<size_t> rankA(batch.size()); 
-        std::vector<size_t> rankB(batch.size()); 
-        std::vector<size_t> rankC(batch.size());
-        std::vector<std::vector<unsigned char>> all_connections(batch.size());
-        
         // Store the indices where new gates will be inserted
         std::vector<size_t> new_gate_indices;
-        size_t base_size = gate_vector.size();
         
-        // First pass: create all new gates
-        for (size_t i = 0; i < batch.size(); i++) {
-            std::vector<unsigned char> result_qubits;
-            result_qubits.insert(result_qubits.end(), 
-                gate_vector[batch[i].g1]->span.begin(), 
-                gate_vector[batch[i].g1]->span.end());
-            result_qubits.insert(result_qubits.end(), 
-                gate_vector[batch[i].g2]->span.begin(), 
-                gate_vector[batch[i].g2]->span.end());
-            
-            sort(result_qubits.begin(), result_qubits.end());
-            result_qubits.erase(unique(result_qubits.begin(), result_qubits.end()), 
-                               result_qubits.end());
-    
-            // Create new gate
-            gate_vector.push_back(std::make_unique<sycl_gate_wrapper>(sycl_gate_wrapper{
-                sycl::malloc_device<cpx>(1 << (2 * result_qubits.size()), queue_),
-                std::move(result_qubits)
-            }));
-            
-            new_gate_indices.push_back(gate_vector.size() - 1);
-            
-            // Set up contraction inputs
-            A[i] = gate_vector[batch[i].g1]->unitary;
-            B[i] = gate_vector[batch[i].g2]->unitary;
-            C[i] = gate_vector.back()->unitary;
-            spanA[i] = gate_vector[batch[i].g1]->span.data();
-            spanB[i] = gate_vector[batch[i].g2]->span.data();
-            spanC[i] = gate_vector.back()->span.data();
-            rankA[i] = gate_vector[batch[i].g1]->span.size();
-            rankB[i] = gate_vector[batch[i].g2]->span.size();
-            rankC[i] = gate_vector.back()->span.size();
-            all_connections[i] = batch[i].connections;
+        // Create the batch metadata
+        batch_metadata batch_meta(batch, new_gate_indices, gate_vector, queue_);
+        batch_metadata oneMath_batch_meta(oneMath_batch, new_gate_indices, gate_vector, queue_);
+
+        // general_batched_contraction(A, B, C, rankA, rankB, rankC, 
+        //                           spanA, spanB, spanC, all_connections);    
+        general_batched_contraction(
+            batch_meta.A, batch_meta.B, batch_meta.C,
+            batch_meta.rankA, batch_meta.rankB, batch_meta.rankC,
+            batch_meta.spanA, batch_meta.spanB, batch_meta.spanC,
+            batch_meta.all_connections
+        );
+
+        for (size_t i = 0; i < oneMath_batch_meta.rankC.size(); i++)
+        {
+            single_contraction(oneMath_batch_meta.A[i], oneMath_batch_meta.B[i], oneMath_batch_meta.C[i],
+                            oneMath_batch_meta.rankA[i], oneMath_batch_meta.rankB[i], oneMath_batch_meta.rankC[i],
+                            oneMath_batch_meta.spanA[i], oneMath_batch_meta.spanB[i], oneMath_batch_meta.spanC[i]);
         }
-    
-        // Perform the batched contraction
-        general_batched_contraction(A, B, C, rankA, rankB, rankC, 
-                                  spanA, spanB, spanC, all_connections);
-    
+
         // Update gate pointers and cleanup
         std::vector<size_t> indices_to_remove;
         for (size_t i = 0; i < batch.size(); i++) {
@@ -483,6 +520,12 @@ public:
             
             // Update the pointer to the new gate
             gate_pointer[batch[i].g1i] = new_gate_indices[i];
+        }
+
+        for (size_t i = 0; i < oneMath_batch.size(); i++)
+        {
+            indices_to_remove.push_back(oneMath_batch[i].g2i);
+            gate_pointer[oneMath_batch[i].g1i] = new_gate_indices[i + batch.size()];
         }
         
         // Sort in descending order to remove from back to front
@@ -495,6 +538,7 @@ public:
         }
         
         batch.clear();
+        oneMath_batch.clear();
     }
 };
 extern "C"
@@ -535,6 +579,7 @@ extern "C"
         bool contraction = false;
 
         std::vector<contraction_t> batch;
+        std::vector<contraction_t> oneMath_batch;
 
         while (gate_pointer.size() > 1)
         {
@@ -544,7 +589,6 @@ extern "C"
             for (size_t ii = 0; ii < gate_pointer.size() - 1; ii++)
             {
                 // print batched array
-                // if (batch.size() >= 10) break;
                 if (batched[ii] || batched[ii + 1]) continue;
                 size_t g1 = gate_pointer[ii];
                 size_t g2 = gate_pointer[ii + 1];
@@ -556,7 +600,9 @@ extern "C"
 
                 if ( connections.size() >= threshold )
                 {
-                    batch.push_back(contraction_t{g1, g2, ii, ii + 1, connections});
+                    if (gate_vector[g1]->span == gate_vector[g2]->span && std::is_sorted(gate_vector[g1]->span.begin(), gate_vector[g1]->span.end())) oneMath_batch.push_back(contraction_t{g1, g2, ii, ii + 1, connections});
+                    else batch.push_back(contraction_t{g1, g2, ii, ii + 1, connections});
+
                     batched[ii] = true;
                     batched[ii + 1] = true;
                     
@@ -565,8 +611,7 @@ extern "C"
                 }
             }
             if (!contraction) threshold = threshold - 1 >= 0 ? threshold - 1 : 0;
-            else {contractor.batched_contraction(batch, gate_vector, gate_pointer, num_qubits); batch.clear();}
-                    
+            else {contractor.batched_contraction(batch, oneMath_batch, gate_vector, gate_pointer, num_qubits); batch.clear();}
         }
 
         contractor.queue_.memcpy(result_gate, gate_vector[gate_pointer[0]]->unitary, sizeof(cpx) * (1 << (2 * num_qubits))).wait();
